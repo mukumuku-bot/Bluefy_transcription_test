@@ -8,6 +8,7 @@ const elements = {
   nativeButton: document.querySelector("#nativeButton"),
   nativeStopButton: document.querySelector("#nativeStopButton"),
   aiButton: document.querySelector("#aiButton"),
+  modelSelect: document.querySelector("#modelSelect"),
   nativeText: document.querySelector("#nativeText"),
   aiText: document.querySelector("#aiText"),
   audioPlayer: document.querySelector("#audioPlayer"),
@@ -25,13 +26,15 @@ const state = {
   chunks: [],
   recordedBlob: null,
   recognition: null,
-  transcriber: null,
+  transcribers: new Map(),
 };
 
 const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+const RECORDING_MS = 8000;
+const AI_SAMPLE_RATE = 16000;
 
 elements.checkButton.addEventListener("click", checkFeatures);
-elements.recordButton.addEventListener("click", recordThreeSeconds);
+elements.recordButton.addEventListener("click", recordSample);
 elements.playButton.addEventListener("click", playRecording);
 elements.nativeButton.addEventListener("click", startNativeTranscription);
 elements.nativeStopButton.addEventListener("click", stopNativeTranscription);
@@ -116,7 +119,7 @@ function updateLevel() {
   state.levelRafId = requestAnimationFrame(updateLevel);
 }
 
-async function recordThreeSeconds() {
+async function recordSample() {
   try {
     const stream = await ensureMic();
     state.chunks = [];
@@ -124,11 +127,13 @@ async function recordThreeSeconds() {
     elements.recordButton.disabled = true;
     elements.playButton.disabled = true;
     elements.aiButton.disabled = true;
-    log("3秒録音を開始");
+    log("8秒録音を開始。犬の名前や「おいで」をはっきり話してください");
 
-    const mimeType = MediaRecorder.isTypeSupported("audio/webm")
-      ? "audio/webm"
-      : "";
+    const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+      ? "audio/webm;codecs=opus"
+      : MediaRecorder.isTypeSupported("audio/webm")
+        ? "audio/webm"
+        : "";
     state.recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
 
     state.recorder.addEventListener("dataavailable", (event) => {
@@ -149,7 +154,7 @@ async function recordThreeSeconds() {
     state.recorder.start();
     window.setTimeout(() => {
       if (state.recorder?.state === "recording") state.recorder.stop();
-    }, 3000);
+    }, RECORDING_MS);
   } catch (error) {
     elements.recordButton.disabled = false;
     setStatus(elements.micStatus, `録音失敗: ${error.name || "error"}`);
@@ -219,32 +224,27 @@ function stopNativeTranscription() {
 
 async function transcribeWithFreeAi() {
   if (!state.recordedBlob) {
-    log("先に3秒録音してください");
+    log("先に8秒録音してください");
     return;
   }
 
   elements.aiButton.disabled = true;
+  const modelId = elements.modelSelect.value;
   setStatus(elements.aiStatus, "読み込み中");
   elements.aiText.value = "";
 
   try {
-    if (!state.transcriber) {
-      log("無料AIモデルを読み込み中。初回は時間がかかります");
-      const transformers = await import("https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2");
-      transformers.env.allowLocalModels = false;
-      state.transcriber = await transformers.pipeline(
-        "automatic-speech-recognition",
-        "Xenova/whisper-tiny"
-      );
-      log("無料AIモデル読み込み完了");
-    }
+    const transcriber = await getTranscriber(modelId);
 
     setStatus(elements.aiStatus, "解析中");
-    const audio = await blobToMonoFloat32(state.recordedBlob);
-    const result = await state.transcriber(audio.data, {
+    const audio = await blobToMono16k(state.recordedBlob);
+    log(`AI解析開始: ${modelId}, ${Math.round(audio.data.length / audio.sampleRate)}秒`);
+
+    const result = await transcriber(audio.data, {
       sampling_rate: audio.sampleRate,
-      language: "japanese",
+      language: "ja",
       task: "transcribe",
+      return_timestamps: false,
     });
 
     const text = typeof result === "string" ? result : result.text || "";
@@ -259,22 +259,56 @@ async function transcribeWithFreeAi() {
   }
 }
 
-async function blobToMonoFloat32(blob) {
+async function getTranscriber(modelId) {
+  if (state.transcribers.has(modelId)) return state.transcribers.get(modelId);
+
+  log(`無料AIモデルを読み込み中: ${modelId}`);
+  const transformers = await import("https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2");
+  transformers.env.allowLocalModels = false;
+  const transcriber = await transformers.pipeline("automatic-speech-recognition", modelId);
+  state.transcribers.set(modelId, transcriber);
+  log(`無料AIモデル読み込み完了: ${modelId}`);
+  return transcriber;
+}
+
+async function blobToMono16k(blob) {
   const arrayBuffer = await blob.arrayBuffer();
   const AudioContext = window.AudioContext || window.webkitAudioContext;
   const context = new AudioContext();
   const decoded = await context.decodeAudioData(arrayBuffer);
-  const output = new Float32Array(decoded.length);
+  const mono = mixToMono(decoded);
+  const resampled = resampleLinear(mono, decoded.sampleRate, AI_SAMPLE_RATE);
+  await context.close?.();
+  return { data: resampled, sampleRate: AI_SAMPLE_RATE };
+}
 
+function mixToMono(decoded) {
+  const output = new Float32Array(decoded.length);
   for (let channel = 0; channel < decoded.numberOfChannels; channel += 1) {
     const input = decoded.getChannelData(channel);
     for (let index = 0; index < input.length; index += 1) {
       output[index] += input[index] / decoded.numberOfChannels;
     }
   }
+  return output;
+}
 
-  await context.close?.();
-  return { data: output, sampleRate: decoded.sampleRate };
+function resampleLinear(input, fromRate, toRate) {
+  if (fromRate === toRate) return input;
+
+  const ratio = fromRate / toRate;
+  const outputLength = Math.max(1, Math.round(input.length / ratio));
+  const output = new Float32Array(outputLength);
+
+  for (let index = 0; index < outputLength; index += 1) {
+    const position = index * ratio;
+    const left = Math.floor(position);
+    const right = Math.min(left + 1, input.length - 1);
+    const weight = position - left;
+    output[index] = input[left] * (1 - weight) + input[right] * weight;
+  }
+
+  return output;
 }
 
 function setStatus(element, text) {

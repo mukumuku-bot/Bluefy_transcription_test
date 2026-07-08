@@ -35,12 +35,12 @@
 
       <section class="panel">
         <h2>2. マイク録音テスト</h2>
-        <p class="hint">Bluefyでまずここが動けば、音声データ自体は取得できています。</p>
+        <p class="hint">Bluefyでここが動けば、音声データ自体は取得できています。はっきり大きめの声で8秒ほど話してください。</p>
         <div class="meter">
           <div id="levelBar"></div>
         </div>
         <div class="actions">
-          <button id="recordButton" type="button">3秒録音</button>
+          <button id="recordButton" type="button">8秒録音</button>
           <button id="playButton" type="button" disabled>再生</button>
         </div>
         <audio id="audioPlayer" controls hidden></audio>
@@ -48,7 +48,7 @@
 
       <section class="panel">
         <h2>3. 標準文字起こし</h2>
-        <p class="hint">Safariで動きやすい方式です。Bluefyではここが失敗する可能性があります。</p>
+        <p class="hint">Safariで動きやすい方式です。Bluefyでは失敗する可能性が高いです。</p>
         <div class="actions">
           <button id="nativeButton" type="button">標準文字起こし開始</button>
           <button id="nativeStopButton" type="button" disabled>停止</button>
@@ -58,7 +58,13 @@
 
       <section class="panel">
         <h2>4. 無料AI文字起こし</h2>
-        <p class="hint">録音した音声をブラウザ内のWhisper tinyで解析します。初回はモデル読み込みに時間がかかります。</p>
+        <p class="hint">録音した音声をブラウザ内のWhisperで解析します。base推奨、smallは高精度ですがかなり重いです。</p>
+        <label class="select-label" for="modelSelect">AIモデル</label>
+        <select id="modelSelect">
+          <option value="Xenova/whisper-base" selected>base 推奨</option>
+          <option value="Xenova/whisper-tiny">tiny 軽い</option>
+          <option value="Xenova/whisper-small">small 高精度・重い</option>
+        </select>
         <button id="aiButton" type="button" disabled>録音した音声をAI解析</button>
         <textarea id="aiText" readonly placeholder="AI解析結果がここに出ます"></textarea>
       </section>
