@@ -79,9 +79,9 @@ async function ensureMic() {
 
   state.stream = await navigator.mediaDevices.getUserMedia({
     audio: {
-      echoCancellation: true,
-      noiseSuppression: true,
-      autoGainControl: true,
+      echoCancellation: false,
+      noiseSuppression: false,
+      autoGainControl: false,
     },
     video: false,
   });
@@ -238,13 +238,15 @@ async function transcribeWithFreeAi() {
 
     setStatus(elements.aiStatus, "解析中");
     const audio = await blobToMono16k(state.recordedBlob);
-    log(`AI解析開始: ${modelId}, ${Math.round(audio.data.length / audio.sampleRate)}秒`);
+    log(`AI解析開始: ${modelId}, ${Math.round(audio.data.length / audio.sampleRate)}秒, 音量 ${audio.peakText}`);
 
     const result = await transcriber(audio.data, {
       sampling_rate: audio.sampleRate,
       language: "ja",
       task: "transcribe",
       return_timestamps: false,
+      chunk_length_s: 8,
+      stride_length_s: 1,
     });
 
     const text = typeof result === "string" ? result : result.text || "";
@@ -277,9 +279,15 @@ async function blobToMono16k(blob) {
   const context = new AudioContext();
   const decoded = await context.decodeAudioData(arrayBuffer);
   const mono = mixToMono(decoded);
-  const resampled = resampleLinear(mono, decoded.sampleRate, AI_SAMPLE_RATE);
+  const trimmed = trimSilence(mono, decoded.sampleRate);
+  const normalized = normalizeAudio(trimmed);
+  const resampled = resampleLinear(normalized.data, decoded.sampleRate, AI_SAMPLE_RATE);
   await context.close?.();
-  return { data: resampled, sampleRate: AI_SAMPLE_RATE };
+  return {
+    data: resampled,
+    sampleRate: AI_SAMPLE_RATE,
+    peakText: `${Math.round(normalized.peak * 100)}%`,
+  };
 }
 
 function mixToMono(decoded) {
@@ -309,6 +317,42 @@ function resampleLinear(input, fromRate, toRate) {
   }
 
   return output;
+}
+
+function trimSilence(input, sampleRate) {
+  const threshold = 0.012;
+  const padding = Math.round(sampleRate * 0.25);
+  let start = 0;
+  let end = input.length - 1;
+
+  while (start < input.length && Math.abs(input[start]) < threshold) start += 1;
+  while (end > start && Math.abs(input[end]) < threshold) end -= 1;
+
+  if (start >= end) return input;
+
+  const paddedStart = Math.max(0, start - padding);
+  const paddedEnd = Math.min(input.length, end + padding);
+  return input.slice(paddedStart, paddedEnd);
+}
+
+function normalizeAudio(input) {
+  let peak = 0;
+  for (const sample of input) {
+    peak = Math.max(peak, Math.abs(sample));
+  }
+
+  if (peak < 0.001) {
+    return { data: input, peak };
+  }
+
+  const targetPeak = 0.85;
+  const gain = Math.min(12, targetPeak / peak);
+  const output = new Float32Array(input.length);
+  for (let index = 0; index < input.length; index += 1) {
+    output[index] = Math.max(-1, Math.min(1, input[index] * gain));
+  }
+
+  return { data: output, peak };
 }
 
 function setStatus(element, text) {
